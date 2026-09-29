@@ -1,0 +1,826 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EVA</title>
+<style>
+  :root{
+    --bg:#0f1420;
+    --panel:#161d2e;
+    --tile:#1c2438;
+    --tile-active:#232d47;
+    --accent:#5ec8b8;
+    --accent-dim:#3a8f83;
+    --text:#eef2f6;
+    --text-dim:#8b96ab;
+    --danger:#e2725b;
+    --ring-track:#2a3350;
+  }
+  *{box-sizing:border-box;}
+  html,body{
+    margin:0; height:100%;
+    background:var(--bg); color:var(--text);
+    font-family:'Segoe UI', system-ui, sans-serif;
+  }
+  #app{ display:flex; flex-direction:column; height:100%; }
+
+  /* ---- status bar ---- */
+  #statusbar{
+    display:flex; align-items:center; gap:24px;
+    padding:14px 28px;
+    background:var(--panel);
+    border-bottom:1px solid #232c42;
+    font-size:15px;
+  }
+  .status-item{ display:flex; align-items:center; gap:8px; }
+  .dot{ width:10px; height:10px; border-radius:50%; background:var(--text-dim); transition:background .2s; }
+  .dot.on{ background:var(--accent); box-shadow:0 0 8px var(--accent); }
+  #modeToggle{
+    margin-left:auto;
+    display:flex; background:var(--tile); border-radius:999px; padding:4px;
+  }
+  #modeToggle button{
+    border:none; background:none; color:var(--text-dim);
+    padding:8px 18px; border-radius:999px; font-size:14px; cursor:pointer;
+  }
+  #modeToggle button.active{ background:var(--accent); color:#0b120f; font-weight:600; }
+  #lastCommand{ color:var(--text-dim); font-size:14px; min-width:160px; }
+
+  /* ---- home screen ---- */
+  #home{
+    flex:1; display:flex; flex-direction:column; align-items:center;
+    justify-content:center; gap:36px; padding:24px;
+  }
+  #home h1{ font-weight:600; font-size:22px; color:var(--text-dim); margin:0; }
+  #tiles{
+    display:grid; grid-template-columns:repeat(3, 160px);
+    gap:28px;
+  }
+  .tile{
+    position:relative; width:160px; height:160px;
+    background:var(--tile); border-radius:20px;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:10px; cursor:pointer; user-select:none;
+    border:2px solid transparent;
+  }
+  .tile:hover, .tile.dwelling{ background:var(--tile-active); border-color:var(--accent-dim); }
+  .tile svg.icon{ width:42px; height:42px; stroke:var(--text); fill:none; stroke-width:1.6; }
+  .tile .label{ font-size:16px; letter-spacing:.2px; }
+
+  /* dwell progress ring, hidden until hover */
+  .tile .ring{
+    position:absolute; inset:-2px;
+    transform:rotate(-90deg);
+  }
+  .tile .ring circle{
+    fill:none; stroke-width:4;
+  }
+  .tile .ring .track{ stroke:var(--ring-track); opacity:0; }
+  .tile.dwelling .ring .track{ opacity:1; }
+  .tile .ring .progress{
+    stroke:var(--accent);
+    stroke-linecap:round;
+    stroke-dasharray:452; /* 2*pi*r, r=72 */
+    stroke-dashoffset:452;
+  }
+  .tile.selected{ background:var(--accent); border-color:var(--accent); }
+  .tile.selected .icon, .tile.selected .label{ stroke:#0b120f; color:#0b120f; }
+
+  /* instant focus state — shows before dwell starts filling */
+  .tile.focused{ border-color:var(--accent-dim); box-shadow:0 0 0 3px rgba(94,200,184,.15); }
+  .tile:focus-visible{ outline:3px solid var(--accent); outline-offset:3px; }
+
+  /* cancelled dwell — brief flash so a missed selection is visible */
+  .tile.cancelled{ border-color:var(--danger); }
+  .tile.cancelled .ring .progress{ stroke:var(--danger); }
+
+  /* larger invisible hit-tolerance zone than the visual tile itself,
+     since webcam gaze jitters more than a mouse pointer */
+  .tile::after{
+    content:''; position:absolute; inset:-16px;
+  }
+
+  /* gaze/dwell must never reach the tiles before calibration finishes */
+  #home.locked, #home.locked *{ pointer-events:none !important; }
+  #navRow button:disabled{ opacity:.4; cursor:not-allowed; }
+
+  #feedback{
+    min-height:22px; color:var(--accent); font-size:15px;
+  }
+
+  /* live gaze cursor overlay — replace its position updates with
+     real gaze coordinates once the CV module is wired in */
+  #gazeCursor{
+    position:fixed; width:36px; height:36px; border-radius:50%;
+    border:3px solid var(--accent); background:rgba(94,200,184,.15);
+    pointer-events:none; transform:translate(-50%,-50%);
+    display:none; z-index:999; transition:left .06s linear, top .06s linear;
+  }
+  #gazeCursor.show{ display:block; }
+
+  /* ---- calibration screen ---- */
+  #calibration{
+    display:none; flex:1; position:relative; background:var(--bg);
+  }
+  #calibration.show{ display:block; }
+  #calib-instructions{
+    position:absolute; top:24px; left:0; right:0; text-align:center;
+    color:var(--text-dim); font-size:15px;
+  }
+  .calib-dot{
+    position:absolute; width:22px; height:22px; border-radius:50%;
+    background:var(--accent); opacity:.35;
+    transform:translate(-50%,-50%);
+    transition:opacity .2s, transform .2s;
+  }
+  .calib-dot.active{ opacity:1; transform:translate(-50%,-50%) scale(1.3); box-shadow:0 0 14px var(--accent); }
+
+  #startCalib{
+    position:absolute; bottom:28px; left:50%; transform:translateX(-50%);
+    background:var(--tile); color:var(--text); border:1px solid var(--accent-dim);
+    padding:10px 20px; border-radius:10px; font-size:14px; cursor:pointer;
+  }
+
+  #navRow{ display:flex; justify-content:center; gap:12px; padding:16px; background:var(--panel); }
+  #navRow button{
+    background:var(--tile); color:var(--text-dim); border:1px solid #232c42;
+    padding:8px 16px; border-radius:8px; font-size:13px; cursor:pointer;
+  }
+  #navRow button.active{ color:var(--accent); border-color:var(--accent-dim); }
+
+  /* ---- voice command panel ---- */
+  #voicePanel{
+    position:fixed; top:70px; right:24px; width:230px;
+    background:var(--panel); border:1px solid #232c42; border-radius:14px;
+    padding:16px; display:none; flex-direction:column; gap:10px;
+    box-shadow:0 8px 24px rgba(0,0,0,.35);
+  }
+  #voicePanel.show{ display:flex; }
+  #voicePanel h2{
+    margin:0 0 4px 0; font-size:13px; color:var(--text-dim); font-weight:600;
+  }
+  .voice-cmd{
+    display:flex; align-items:center; gap:10px;
+    padding:8px 10px; border-radius:8px; font-size:14px;
+    background:var(--tile); transition:background .2s, color .2s;
+  }
+  .voice-cmd .mic-icon{ width:14px; height:14px; flex-shrink:0; stroke:var(--text-dim); fill:none; stroke-width:1.8; }
+  .voice-cmd.recognized{ background:var(--accent); color:#0b120f; }
+  .voice-cmd.recognized .mic-icon{ stroke:#0b120f; }
+
+  /* large center banner shown briefly when a command is recognized */
+  #voiceToast{
+    position:fixed; top:50%; left:50%; transform:translate(-50%,-50%) scale(.9);
+    background:var(--accent); color:#0b120f; font-size:20px; font-weight:600;
+    padding:18px 32px; border-radius:16px;
+    opacity:0; pointer-events:none; transition:opacity .18s, transform .18s;
+    z-index:1000;
+  }
+  #voiceToast.show{ opacity:1; transform:translate(-50%,-50%) scale(1); }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <div id="statusbar">
+    <div class="status-item"><span class="dot" id="gazeDot"></span> Gaze <span id="gazeState">not detected</span></div>
+    <div class="status-item"><span class="dot" id="voiceDot"></span> Mic <span id="voiceState">idle</span></div>
+    <div id="lastCommand">Last command: —</div>
+    <div id="modeToggle">
+      <button id="btnGazeMode" class="active">Gaze mode</button>
+      <button id="btnVoiceMode">Voice mode</button>
+    </div>
+  </div>
+
+  <div id="home">
+    <h1>Look at a tile and hold your gaze to open it</h1>
+    <div id="tiles">
+      <!-- tiles injected by JS -->
+    </div>
+    <div id="feedback"></div>
+  </div>
+
+  <div id="calibration">
+    <div id="calib-instructions">Hold your gaze on each dot as it lights up</div>
+    <button id="startCalib">Start calibration</button>
+  </div>
+
+  <div id="navRow">
+    <button id="navHome" class="active">Home</button>
+    <button id="navCalib">Calibration</button>
+    <button id="navInputMode">Input: Simulated gaze (hover)</button>
+  </div>
+
+</div>
+
+<div id="gazeCursor"></div>
+<div id="voiceToast"></div>
+
+<div id="voicePanel">
+  <h2>Available voice commands</h2>
+  <!-- items injected by JS -->
+</div>
+
+<script>
+/* ---------------------------------------------------------
+   This is a UI prototype only.
+   Real gaze coordinates from the CV module should drive
+   `beginDwell(tileEl)` / `cancelDwell()` instead of mouse
+   hover — swap the two event listeners marked below.
+--------------------------------------------------------- */
+
+const DWELL_MS = 2000;
+
+const icons = {
+  browser: '<path d="M3 12h18M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18Z"/><circle cx="12" cy="12" r="9"/>',
+  media:   '<circle cx="12" cy="12" r="9"/><path d="M10 9l6 3-6 3V9Z"/>',
+  files:   '<path d="M4 5h6l2 2h8v12H4V5Z"/>',
+  notes:   '<path d="M5 3h14v18H5z"/><path d="M8 8h8M8 12h8M8 16h5"/>',
+  camera:  '<path d="M4 8h4l2-2h4l2 2h4v11H4V8Z"/><circle cx="12" cy="13" r="3.5"/>'
+};
+
+const tileDefs = [
+  {id:'browser', label:'Browser'},
+  {id:'media',   label:'Media'},
+  {id:'files',   label:'Files'},
+  {id:'notes',   label:'Notes'},
+  {id:'camera',  label:'Camera'}
+];
+
+const tilesEl = document.getElementById('tiles');
+tileDefs.forEach(def => {
+  const tile = document.createElement('div');
+  tile.className = 'tile';
+  tile.dataset.id = def.id;
+  tile.tabIndex = 0;                      // keyboard-focusable fallback
+  tile.setAttribute('role', 'button');
+  tile.setAttribute('aria-label', def.label);
+  tile.innerHTML = `
+    <svg class="ring" viewBox="0 0 160 160">
+      <circle class="track" cx="80" cy="80" r="72"></circle>
+      <circle class="progress" cx="80" cy="80" r="72"></circle>
+    </svg>
+    <svg class="icon" viewBox="0 0 24 24">${icons[def.id]}</svg>
+    <div class="label">${def.label}</div>
+  `;
+  tilesEl.appendChild(tile);
+});
+
+let dwellTimer = null;
+let dwellStart = null;
+let activeTile = null;
+let cooldownUntil = 0;                    // prevents instant re-trigger after a selection
+const COOLDOWN_MS = 1000;
+
+function focusTile(tile){
+  // instant highlight the moment gaze/hover lands, before dwell fill begins
+  document.querySelectorAll('.tile.focused').forEach(t => t.classList.remove('focused'));
+  tile.classList.add('focused');
+}
+
+// Lets main.py know the page is still open, so it can stop itself
+// automatically a few seconds after this tab is closed.
+setInterval(() => {
+  fetch('/api/heartbeat', { method: 'POST' }).catch(() => {});
+}, 2000);
+fetch('/api/heartbeat', { method: 'POST' }).catch(() => {});
+
+function beginDwell(tile){
+  if (liveGazeMode) return;                         // real gaze drives dwell instead
+  if (performance.now() < cooldownUntil) return;   // ignore input during cooldown
+  if (activeTile === tile) return;
+  cancelDwell();
+  focusTile(tile);
+  activeTile = tile;
+  tile.classList.add('dwelling');
+  tile.classList.remove('cancelled');
+  dwellStart = performance.now();
+  const progressCircle = tile.querySelector('.progress');
+  const circumference = 452;
+
+  function step(now){
+    const elapsed = now - dwellStart;
+    const pct = Math.min(elapsed / DWELL_MS, 1);
+    progressCircle.style.strokeDashoffset = circumference * (1 - pct);
+    if (pct >= 1){
+      selectTile(tile);
+      return;
+    }
+    dwellTimer = requestAnimationFrame(step);
+  }
+  dwellTimer = requestAnimationFrame(step);
+}
+
+function cancelDwell(wasIncomplete){
+  if (dwellTimer) cancelAnimationFrame(dwellTimer);
+  if (activeTile){
+    const elapsed = dwellStart ? performance.now() - dwellStart : 0;
+    activeTile.classList.remove('dwelling');
+    activeTile.querySelector('.progress').style.strokeDashoffset = 452;
+    // flash red only if the dwell had meaningfully started (not just a passing glance)
+    if (wasIncomplete !== false && elapsed > 250){
+      const t = activeTile;
+      t.classList.add('cancelled');
+      setTimeout(() => t.classList.remove('cancelled'), 400);
+      document.getElementById('feedback').textContent = 'Selection cancelled — gaze moved away';
+    }
+  }
+  activeTile = null;
+  dwellTimer = null;
+}
+
+function selectTile(tile){
+  // Manual path (mouse-hover / keyboard fallback modes only). In Live
+  // gaze mode, selection + the actual action already happen on the
+  // backend (main.py -> /api/gaze) and we just animate — see
+  // selectTileVisualOnly().
+  cancelDwell(false);
+  tile.classList.add('selected');
+  tile.classList.remove('focused');
+  const label = tile.querySelector('.label').textContent;
+  document.getElementById('feedback').textContent = `Opening ${label}…`;
+  cooldownUntil = performance.now() + COOLDOWN_MS;
+  setTimeout(() => tile.classList.remove('selected'), 500);
+
+  fetch('/api/trigger', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target: tile.dataset.id.toUpperCase() })
+  })
+    .then(r => r.json())
+    .then(res => {
+      document.getElementById('feedback').textContent =
+        res.status === 'error' ? `Error: ${res.message}` : `${label}: ${res.message || res.status}`;
+    })
+    .catch(() => {
+      document.getElementById('feedback').textContent = `${label} selected (backend not reachable)`;
+    });
+}
+
+/* ---- LIVE GAZE (webcam, via main.py) -----------------------------
+   Polls the backend a few times a second for the real gaze
+   coordinates + dwell progress that main.py is computing from the
+   webcam, and renders them directly — no mouse involved. The actual
+   action already runs on the backend the moment a dwell completes;
+   here we only animate the matching effect. */
+let liveGazeMode = false;
+let gazePollTimer = null;
+const RING_CIRCUMFERENCE = 452;
+
+function setDwellRing(tile, progress){
+  tile.querySelector('.progress').style.strokeDashoffset = RING_CIRCUMFERENCE * (1 - progress);
+}
+
+function serverDwellUpdate(tile, progress){
+  if (activeTile && activeTile !== tile){
+    activeTile.classList.remove('dwelling', 'focused');
+    setDwellRing(activeTile, 0);
+  }
+  if (!tile){
+    activeTile = null;
+    return;
+  }
+  tile.classList.add('focused', 'dwelling');
+  setDwellRing(tile, progress);
+  activeTile = tile;
+}
+
+function selectTileVisualOnly(tile){
+  tile.classList.add('selected');
+  tile.classList.remove('focused', 'dwelling');
+  setDwellRing(tile, 0);
+  document.getElementById('feedback').textContent =
+    `Opened ${tile.querySelector('.label').textContent} (via gaze)`;
+  setTimeout(() => tile.classList.remove('selected'), 500);
+  activeTile = null;
+}
+
+/* Gaze coordinates (and calibration dots) are fractions of the area between
+   the status bar and the nav row. Tile rects are reported in that same frame
+   so what you look at, what is drawn and what is hit-tested all agree. */
+const HIT_PAD = 12;   // px of extra tolerance around each tile (webcam gaze is noisy)
+function gazeBox(){
+  const top = document.getElementById('statusbar').getBoundingClientRect().bottom;
+  const bottom = document.getElementById('navRow').getBoundingClientRect().top;
+  return { top, height: Math.max(bottom - top, 1), width: window.innerWidth };
+}
+function reportLayout(){
+  const b = gazeBox(), tiles = {};
+  if (homeEl.style.display !== 'none'){          // hidden tiles must not be gaze targets
+    tilesEl.querySelectorAll('.tile').forEach(t => {
+      const r = t.getBoundingClientRect();
+      tiles[t.dataset.id] = [
+        (r.left - HIT_PAD) / b.width,  (r.top - HIT_PAD - b.top) / b.height,
+        (r.right + HIT_PAD) / b.width, (r.bottom + HIT_PAD - b.top) / b.height
+      ];
+    });
+  }
+  // On-screen Voice-mode button (status bar, top right). Gaze is clamped to the
+  // screen area, so its hit zone extends from the top edge down to 14% of the box.
+  const vr = btnVoiceMode.getBoundingClientRect();
+  tiles['MODE_VOICE'] = [(vr.left - 2*HIT_PAD) / b.width, -1, Math.min((vr.right + 2*HIT_PAD) / b.width, 1.5), 0.14];
+  fetch('/api/layout', { method:'POST', headers:{'Content-Type':'application/json'},
+                         body: JSON.stringify({ tiles }) }).catch(() => {});
+}
+window.addEventListener('resize', reportLayout);
+setInterval(reportLayout, 1000);   // cheap safety net (page zoom, screen switches)
+
+/* App state (mirrors server): CALIBRATION_IDLE -> CALIBRATING -> ACTIVE.
+   In live mode the tiles are locked/non-interactive unless ACTIVE. */
+let appState = 'CALIBRATION_IDLE';
+let channel = 'gaze';            // 'gaze' | 'voice' (exactly one input is live)
+
+function gazeLocked(){ return liveGazeMode && channel === 'gaze' && appState !== 'ACTIVE'; }
+
+function applyAppState(st, force){
+  if (st === appState && !force) return;
+  appState = st;
+  if (liveGazeMode){
+    const active = (st === 'ACTIVE') || channel === 'voice';
+    homeEl.classList.toggle('locked', !active);
+    navHome.disabled = !active;
+    navCalib.disabled = (st === 'CALIBRATING');
+    btnGazeMode.disabled = btnVoiceMode.disabled = (st === 'CALIBRATING');
+    if (!active){
+      if (activeTile){ activeTile.classList.remove('dwelling','focused'); setDwellRing(activeTile,0); activeTile = null; }
+      gazeCursor.classList.remove('show');
+      if (homeEl.style.display !== 'none') showCalibScreen();   // never sit on tiles un-calibrated
+    }
+  }
+}
+
+function startLiveGazePolling(){
+  if (gazePollTimer) return;
+  gazePollTimer = setInterval(async () => {
+    let state;
+    try {
+      const res = await fetch('/api/gaze');
+      state = await res.json();
+    } catch (e) {
+      return; // server.py / main.py not up yet — try again next tick
+    }
+    applyAppState(state.app_state || 'CALIBRATION_IDLE');
+    if (channel === 'voice'){
+      gazeDot.classList.remove('on');
+      gazeState.textContent = 'off (voice mode)';
+      gazeCursor.classList.remove('show');
+      serverDwellUpdate(null, 0);
+      return;
+    }
+    if (state.app_state !== 'ACTIVE'){
+      // gaze is OFF (idle) or only used by the calibration dots (calibrating)
+      gazeDot.classList.remove('on');
+      gazeState.textContent = state.app_state === 'CALIBRATING' ? 'calibrating' : 'waiting for calibration';
+      gazeCursor.classList.remove('show');
+      serverDwellUpdate(null, 0);
+      return;
+    }
+    gazeDot.classList.toggle('on', !!state.detected);
+    gazeState.textContent = state.detected ? 'tracking' : 'not detected';
+
+    if (state.detected && state.x != null && state.y != null){
+      gazeCursor.classList.add('show');
+      const gb = gazeBox();
+      gazeCursor.style.left = (state.x * gb.width) + 'px';
+      gazeCursor.style.top = (gb.top + state.y * gb.height) + 'px';
+    } else {
+      gazeCursor.classList.remove('show');
+    }
+
+    const onModeBtn = state.target === 'MODE_VOICE';
+    btnVoiceMode.style.background = onModeBtn
+      ? `linear-gradient(to right, var(--accent) ${Math.round((state.progress||0)*100)}%, var(--tile) ${Math.round((state.progress||0)*100)}%)`
+      : '';
+    btnVoiceMode.style.color = onModeBtn ? '#0b120f' : '';
+    const targetTile = (state.target && !onModeBtn)
+      ? tilesEl.querySelector(`[data-id="${state.target.toLowerCase()}"]`)
+      : null;
+    serverDwellUpdate(targetTile, state.progress || 0);
+
+    if (state.justSelected){
+      const sel = tilesEl.querySelector(`[data-id="${state.justSelected.toLowerCase()}"]`);
+      if (sel) selectTileVisualOnly(sel);
+      lastCommand.textContent = `Last command: ${state.justSelected} (gaze)`;
+    }
+  }, 100);
+}
+
+function stopLiveGazePolling(){
+  if (gazePollTimer){ clearInterval(gazePollTimer); gazePollTimer = null; }
+  gazeCursor.classList.remove('show');
+  gazeDot.classList.remove('on');
+  gazeState.textContent = 'not detected';
+  if (activeTile){
+    activeTile.classList.remove('dwelling', 'focused');
+    setDwellRing(activeTile, 0);
+    activeTile = null;
+  }
+}
+
+/* --- stand-in input: mouse hover simulates gaze fixation ---
+   Swap these two listeners for your CV module's gaze events,
+   e.g. onGazeEnter(tileEl) / onGazeLeave(tileEl). Keep focusTile()/
+   beginDwell()/cancelDwell() as-is — they don't care where the
+   "gaze" comes from. */
+tilesEl.addEventListener('mouseover', e => {
+  const tile = e.target.closest('.tile');
+  if (tile) beginDwell(tile);
+});
+tilesEl.addEventListener('mouseout', e => {
+  const tile = e.target.closest('.tile');
+  if (tile && !e.relatedTarget?.closest('.tile')) cancelDwell();
+});
+
+/* --- keyboard fallback: Tab to a tile, Enter/Space selects immediately.
+   Useful for testing without a webcam and as an accessible alternative
+   input path. */
+tilesEl.addEventListener('focusin', e => {
+  const tile = e.target.closest('.tile');
+  if (tile) focusTile(tile);
+});
+tilesEl.addEventListener('keydown', e => {
+  const tile = e.target.closest('.tile');
+  if (!tile) return;
+  if (e.key === 'Enter' || e.key === ' '){
+    e.preventDefault();
+    selectTile(tile);
+  }
+});
+
+/* --- gaze cursor overlay: follows the mouse as a stand-in.
+   Replace the mousemove listener with your CV module's gaze
+   coordinate stream (e.g. onGazeUpdate(x, y)). */
+const gazeCursor = document.getElementById('gazeCursor');
+const inputModeBtn = document.getElementById('navInputMode');
+let cursorEnabled = true;
+
+document.addEventListener('mousemove', e => {
+  if (!cursorEnabled) return;
+  gazeCursor.classList.add('show');
+  gazeCursor.style.left = e.clientX + 'px';
+  gazeCursor.style.top = e.clientY + 'px';
+});
+const inputModes = ['hover', 'keyboard', 'live'];
+let inputModeIndex = 0;
+
+function applyInputMode(mode){
+  liveGazeMode = (mode === 'live');
+  cursorEnabled = (mode === 'hover');
+  gazeCursor.classList.toggle('show', cursorEnabled);
+
+  if (mode === 'live'){
+    inputModeBtn.textContent = 'Input: Live gaze (webcam)';
+    appState = null;                 // force re-apply on first poll
+    document.getElementById('home').classList.add('locked');  // locked until server says ACTIVE
+    document.getElementById('navHome').disabled = true;
+    startLiveGazePolling();
+  } else {
+    inputModeBtn.textContent = mode === 'hover'
+      ? 'Input: Simulated gaze (hover)'
+      : 'Input: Keyboard only';
+    stopLiveGazePolling();
+    document.getElementById('home').classList.remove('locked');
+    document.getElementById('navHome').disabled = false;
+    document.getElementById('navCalib').disabled = false;
+  }
+}
+
+inputModeBtn.addEventListener('click', () => {
+  inputModeIndex = (inputModeIndex + 1) % inputModes.length;
+  applyInputMode(inputModes[inputModeIndex]);
+});
+
+// Auto-activate live gaze mode when main.py opens the site with
+// ?mode=live, so there's nothing to click manually.
+const urlMode = new URLSearchParams(window.location.search).get('mode');
+if (urlMode && inputModes.includes(urlMode)){
+  inputModeIndex = inputModes.indexOf(urlMode);
+  applyInputMode(urlMode);
+}
+
+/* ---- voice commands ---- */
+const voiceCommands = [
+  {key:'browser', text:'"open browser" or "browser"', target:'browser'},
+  {key:'media',   text:'"open media" or "media"',     target:'media'},
+  {key:'files',   text:'"open files" or "files"',     target:'files'},
+  {key:'notes',   text:'"open notes" or "notes"',     target:'notes'},
+  {key:'camera',  text:'"open camera" or "camera"',   target:'camera'},
+  {key:'go back', text:'"go back" → gaze mode',       target:null}
+];
+
+const voicePanel = document.getElementById('voicePanel');
+const voiceToast = document.getElementById('voiceToast');
+
+voiceCommands.forEach(cmd => {
+  const item = document.createElement('div');
+  item.className = 'voice-cmd';
+  item.dataset.phrase = cmd.key;
+  item.innerHTML = `
+    <svg class="mic-icon" viewBox="0 0 24 24"><path d="M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3Z"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+    ${cmd.text}
+  `;
+  voicePanel.appendChild(item);
+});
+
+/* VOICE (real): the backend (voice/voice_commands.py) keeps the mic open in
+   BOTH modes and already EXECUTES everything (button actions AND mode
+   switches). The page only mirrors the result. */
+let voicePollTimer = null;
+
+function handleVoiceEvent(ev){
+  const cmd = ev.command;
+  voiceToast.textContent = cmd === 'VOICE_MODE' ? 'Voice mode' : cmd === 'BACK' ? 'Gaze mode' : `"${ev.heard}"`;
+  voiceToast.classList.add('show');
+  setTimeout(() => voiceToast.classList.remove('show'), 900);
+  lastCommand.textContent = `Last command: "${ev.heard}" (voice)`;
+  if (cmd === 'VOICE_MODE' || cmd === 'BACK') return;      // mode sync happens via v.mode
+
+  document.querySelectorAll('.voice-cmd.recognized').forEach(el => el.classList.remove('recognized'));
+  const target = cmd.toLowerCase();
+  const item = voicePanel.querySelector(`[data-phrase="${target}"]`);
+  if (item){ item.classList.add('recognized'); setTimeout(() => item.classList.remove('recognized'), 1200); }
+  const st = ev.result && ev.result.status;
+  if (st === 'throttled' || st === 'error') return;        // cooldown / bad target: no false "opened"
+  if (calibEl.classList.contains('show')) showHomeScreen();
+  const tile = tilesEl.querySelector(`[data-id="${target}"]`);
+  if (tile){
+    tile.classList.add('selected');
+    document.getElementById('feedback').textContent = `Opened ${tile.querySelector('.label').textContent} (via voice)`;
+    setTimeout(() => tile.classList.remove('selected'), 700);
+  }
+}
+
+function startVoicePolling(){
+  if (voicePollTimer) return;
+  voicePollTimer = setInterval(async () => {
+    let v;
+    try { v = await (await fetch('/api/voice')).json(); } catch (e) { return; }
+    if (v.mode && v.mode !== channel) applyChannelUI(v.mode);   // switched by gaze button or voice
+    const labels = { starting:'calibrating mic…', listening: channel === 'voice' ? 'listening' : 'say "voice mode"', off:'idle' };
+    voiceDot.classList.toggle('on', v.status === 'listening');
+    voiceState.textContent = v.status === 'error' ? `error: ${v.message}` : (labels[v.status] || v.status);
+    if (v.event) handleVoiceEvent(v.event);
+    else if (v.heard && v.status === 'listening' && channel === 'voice') lastCommand.textContent = `Heard: "${v.heard}"`;
+  }, 300);
+}
+
+function applyChannelUI(ch){
+  if (ch === channel) return;
+  channel = ch;
+  btnGazeMode.classList.toggle('active', ch === 'gaze');
+  btnVoiceMode.classList.toggle('active', ch === 'voice');
+  btnVoiceMode.style.background = ''; btnVoiceMode.style.color = '';
+  voicePanel.classList.toggle('show', ch === 'voice');
+  if (activeTile){ activeTile.classList.remove('dwelling','focused'); setDwellRing(activeTile,0); activeTile = null; }
+  applyAppState(appState, true);
+  if (ch === 'gaze'){
+    // back in gaze mode: tiles if calibrated, otherwise the calibration screen
+    if (gazeLocked()) showCalibScreen(); else showHomeScreen();
+  }
+}
+
+async function setChannel(ch){
+  if (ch === channel) return;
+  try {
+    const r = await fetch('/api/mode', { method:'POST', headers:{'Content-Type':'application/json'},
+                                         body: JSON.stringify({ mode: ch }) });
+    if (!r.ok) return;                                  // e.g. mid-calibration
+  } catch (e) { return; }
+  applyChannelUI(ch);
+}
+
+/* ---- status bar mock toggles ---- */
+const gazeDot = document.getElementById('gazeDot');
+const gazeState = document.getElementById('gazeState');
+const voiceDot = document.getElementById('voiceDot');
+const voiceState = document.getElementById('voiceState');
+const lastCommand = document.getElementById('lastCommand');
+const btnGazeMode = document.getElementById('btnGazeMode');
+const btnVoiceMode = document.getElementById('btnVoiceMode');
+
+// simulate gaze detected once the user moves the mouse over the tile area
+tilesEl.addEventListener('mouseenter', () => {
+  gazeDot.classList.add('on'); gazeState.textContent = 'tracking';
+});
+document.getElementById('home').addEventListener('mouseleave', () => {
+  gazeDot.classList.remove('on'); gazeState.textContent = 'not detected';
+});
+
+btnGazeMode.addEventListener('click', () => setChannel('gaze'));
+btnVoiceMode.addEventListener('click', () => setChannel('voice'));
+// fresh page load always starts in gaze mode (also stops any leftover mic session)
+fetch('/api/mode', { method:'POST', headers:{'Content-Type':'application/json'},
+                     body: JSON.stringify({ mode:'gaze' }) }).catch(() => {});
+startVoicePolling();
+
+/* ---- screen navigation ---- */
+const homeEl = document.getElementById('home');
+const calibEl = document.getElementById('calibration');
+const navHome = document.getElementById('navHome');
+const navCalib = document.getElementById('navCalib');
+
+function showHomeScreen(){
+  if (gazeLocked()) return;   // no tiles before calibration (gaze channel)
+  homeEl.style.display = 'flex';
+  calibEl.classList.remove('show');
+  navHome.classList.add('active'); navCalib.classList.remove('active');
+  reportLayout();
+}
+function showCalibScreen(){
+  homeEl.style.display = 'none';
+  calibEl.classList.add('show');
+  navCalib.classList.add('active'); navHome.classList.remove('active');
+}
+
+navHome.addEventListener('click', showHomeScreen);
+navCalib.addEventListener('click', showCalibScreen);
+
+// main.py opens the site with ?mode=live — start on the Calibration
+// screen so there's a known-good mapping before you ever reach the
+// tiles (the "Start calibration" button still requires a click, so
+// nothing runs until you're ready).
+if (urlMode === 'live'){
+  showCalibScreen();
+}
+
+/* ---- calibration sequence: 5 fixation points ---- */
+const calibPoints = [
+  {x:'8%', y:'12%'}, {x:'92%', y:'12%'}, {x:'50%', y:'50%'},
+  {x:'8%', y:'88%'}, {x:'92%', y:'88%'}
+];
+let calibDots = [];
+
+function buildCalibDots(){
+  calibDots.forEach(d => d.remove());
+  calibDots = calibPoints.map(p => {
+    const d = document.createElement('div');
+    d.className = 'calib-dot';
+    d.style.left = p.x; d.style.top = p.y;
+    calibEl.appendChild(d);
+    return d;
+  });
+}
+buildCalibDots();
+
+document.getElementById('startCalib').addEventListener('click', async function(){
+  let i = 0;
+  this.disabled = true;
+  if (channel === 'voice') await setChannel('gaze');   // calibration is gaze-only
+  const instructions = document.getElementById('calib-instructions');
+
+  try {
+    await fetch('/api/calibration/start', { method: 'POST' });
+  } catch (e) {
+    instructions.textContent = 'Could not reach the backend — is main.py running?';
+    this.disabled = false;
+    return;
+  }
+
+  const nextDot = async () => {
+    calibDots.forEach(d => d.classList.remove('active'));
+
+    if (i >= calibDots.length){
+      instructions.textContent = 'Finishing…';
+      let succeeded = false;
+      try {
+        const res = await fetch('/api/calibration/finish', { method: 'POST' });
+        const result = await res.json();
+        succeeded = result.status === 'ok';
+        instructions.textContent = succeeded
+          ? `Calibration complete — fit error ${result.mae} (lower is better; recalibrate if this looks high). Returning to Home…`
+          : `Calibration failed: ${result.message || 'try again'}`;
+      } catch (e) {
+        instructions.textContent = 'Could not reach the backend to finish calibration.';
+      }
+      document.getElementById('startCalib').disabled = false;
+      if (succeeded){
+        applyAppState('ACTIVE');
+        showHomeScreen();   // immediately: tiles must be visible the moment gaze goes active
+        document.getElementById('feedback').textContent =
+          `Calibration complete — fit error ${result.mae}`;
+      }
+      return;
+    }
+
+    calibDots[i].classList.add('active');
+    instructions.textContent = `Point ${i + 1} of ${calibDots.length} — hold still`;
+
+    // Tells main.py (via the backend) which known point it should be
+    // collecting real webcam gaze samples for right now.
+    try {
+      await fetch('/api/calibration/point', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ index: i })
+      });
+    } catch (e) { /* main.py not running — dot still animates, finish() will report 0 samples */ }
+
+    i++;
+    setTimeout(nextDot, DWELL_MS);
+  };
+  nextDot();
+});
+</script>
+</body>
+</html>
