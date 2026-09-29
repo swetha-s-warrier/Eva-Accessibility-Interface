@@ -1,103 +1,181 @@
-# EVA — Full Merge, Single Command (dataset-trained gaze)
+# EVA — Eye & Voice Accessibility Interface
 
-`main.py` does everything: starts the backend, opens the website
-already in live-gaze mode, and runs the real webcam gaze pipeline —
-one script, one terminal.
+A hands-free desktop launcher controlled by **eye gaze** (webcam) or **voice**.
+Look at a tile for ~2 seconds, or say its name, to open **Browser, Media, Files, Notes** or **Camera**.
+
+Built for people who can't comfortably use a mouse or keyboard. Runs locally with a standard webcam and microphone; no special eye-tracking hardware.
+
+---
+
+## Features
+
+- **Webcam gaze control** — MediaPipe Face Mesh + iris landmarks → MLP base model (trained on MPIIGaze) → per-user 5-point calibration.
+- **Stable selection** — outlier rejection, EMA smoothing, target hysteresis and a 2-second dwell, so a single noisy frame never triggers a button.
+- **Safe startup** — gaze is completely **off until calibration finishes** (`CALIBRATION_IDLE → CALIBRATING → ACTIVE`).
+- **Voice control** — say `open camera` or `camera` (same for browser, media, files, notes).
+- **Hands-free mode switching** — say **"voice mode"** to switch to voice, **"go back"** to return to gaze, or dwell on the top-right *Voice mode* button.
+- **One input at a time** — Gaze *or* Voice is live, never both, to prevent accidental triggers.
+- **Single command launch** — `python main.py` starts the backend, opens the UI and runs the CV loop.
+
+## How it works
 
 ```
-python main.py
-  ├─ starts server.py's Flask app in a background thread
-  ├─ opens http://127.0.0.1:5000/?mode=live in your browser
-  └─ runs the webcam gaze loop:
-       webcam -> MediaPipe -> features
-       -> BASE MODEL (MLP trained on your dataset)  -> rough (x, y)
-       -> CALIBRATION (5-point linear correction)    -> corrected (x, y)
-       -> smoothing -> which tile -> dwell -> POST /api/gaze
-            |
-            ▼
-     server.py stores the state + fires the real action on dwell-complete
-            |
-            ▼
-     frontend.html polls /api/gaze every 100ms and renders the live
-     gaze cursor + dwell ring + selection flash
+Webcam ─► MediaPipe Face Mesh ─► feature vector (8)
+                                     │
+                              Base gaze model (MLP, MPIIGaze)
+                                     │  raw (x, y)
+                              Calibration (5-point linear fix)
+                                     │  calibrated (x, y)
+                        Smoothing + validity/outlier rejection
+                                     │
+                     Stable target (hysteresis) ─► Dwell (2 s)
+                                     │
+                          POST /api/gaze  ──►  Flask backend ──► launches app
+                                                    ▲
+Microphone ─► SpeechRecognition (Google) ───────────┘  (voice commands / mode switch)
+                                                    │
+                                   frontend.html polls & renders UI
 ```
 
-## What's new vs the previous merge
-- **In-browser calibration**: the website's "Calibration" tab (5 dots)
-  is now wired to the real pipeline. Clicking "Start calibration"
-  collects actual webcam samples through `main.py` for each dot,
-  fits + saves a new correction, and `main.py` hot-reloads it — no
-  restart, and `calibrate.py` is no longer a required step.
-- **Two-stage gaze model**: `gaze/base_gaze_model.py` wraps an MLP
-  trained on your dataset (`dataset/prepare_dataset.py` ->
-  `dataset/train_base_model.py` -> `models/base_gaze_model.pkl`).
-  `gaze/calibration.py` is a small linear correction on top of that
-  base model's output.
-- Backend/frontend action-trigger plumbing and the single-command /
-  live-gaze-mode wiring are unchanged from the previous merge.
+### App states
 
-## Setup
+| State | Gaze selection | Notes |
+|---|---|---|
+| `CALIBRATION_IDLE` | OFF | Startup. Nothing can trigger. Voice-mode switch still works. |
+| `CALIBRATING` | Dots only | Collects samples; no buttons, no voice switching. |
+| `ACTIVE` | ON | Target detection + dwell enabled; state/dwell reset on entry, stale events dropped. |
+
+## Project structure
+
+```
+EVA_Final/
+├── main.py                  # Entry point: backend + browser + gaze loop
+├── server.py                # Flask API, app state machine, voice engine control
+├── frontend.html            # Web UI (tiles, calibration, mode toggle)
+├── calibrate.py             # Optional terminal-based calibration
+├── benchmark_test.py        # Action dispatcher test
+├── START_EVA.bat            # Windows launcher (installs deps, runs main.py)
+├── requirements.txt
+├── backend/
+│   ├── action_mapper.py     # Target → action, with cooldown
+│   └── actions.py           # Launches browser/media/files/notes/camera
+├── gaze/
+│   ├── landmark_detection.py
+│   ├── feature_extraction.py   # Single source of truth for train + live features
+│   ├── base_gaze_model.py      # Dataset-trained MLP wrapper
+│   ├── calibration.py          # Per-user linear correction
+│   ├── gaze_model.py           # base + calibration
+│   ├── smoothing.py            # EMA + outlier rejection
+│   └── dwell.py                # Stable target + dwell + cooldown
+├── voice/
+│   └── voice_commands.py       # Mic engine + command matching
+├── dataset/
+│   ├── prepare_dataset.py      # MPIIGaze → features.npy / targets.npy
+│   ├── train_base_model.py     # Trains models/base_gaze_model.pkl
+│   └── cache/
+└── models/
+    ├── base_gaze_model.pkl
+    └── calibration_model.pkl
+```
+
+## Requirements
+
+- Python **3.10**
+- Webcam and microphone
+- Internet connection (voice uses Google's speech service)
+- Windows is the primary target (app launchers in `backend/actions.py` also have macOS/Linux fallbacks)
+
+Key packages are pinned in `requirements.txt` (`scikit-learn==1.7.2` must match the saved `.pkl` models).
+
+## Installation
+
 ```bash
+git clone <your-repo-url>
+cd EVA_Final
+
 python -m venv venv
-venv\Scripts\activate        # Windows   |   source venv/bin/activate  (Mac/Linux)
+venv\Scripts\activate            # Windows
+# source venv/bin/activate       # macOS / Linux
+
 pip install -r requirements.txt
 ```
 
-## Run the demo (1 terminal)
+> **PyAudio on Windows:** if `pip install PyAudio` fails, use `pip install pipwin && pipwin install pyaudio`, or download a matching wheel.
+
+## Usage
+
 ```bash
 python main.py
 ```
-That's the only command you need. Your browser opens automatically
-straight into the **Calibration** screen (nothing runs until you
-click **Start calibration** yourself, so you have time to get ready).
-Look at each of the 5 dots as it lights up (~2s each) — `main.py`
-collects real samples for each one, fits a new correction, and
-reloads it live. On success it shows the fit error and automatically
-returns you to the Home screen after a couple seconds. Then just look
-at a tile; the gaze dot follows your eyes, the ring fills over ~2s,
-and on completion the tile flashes and the real action fires.
+or double-click **`START_EVA.bat`** on Windows.
 
-You can jump back to Calibration any time via the tab, and switch to
-"Simulated gaze (hover)" / "Keyboard only" via the bottom-center
-input-mode button for testing without a webcam.
+Your browser opens on the **Calibration** screen.
 
-`calibrate.py` still exists as a standalone terminal alternative if
-you'd rather calibrate outside the browser (same underlying fit
-logic, its own 5-point sequence and its own cv2 window).
+1. **Calibrate** — click *Start calibration* and look at each of the 5 dots as it lights up (~2 s each). Sit at your normal distance and keep your head fairly still. On success you're taken to the tiles.
+2. **Gaze** — look at a tile; it highlights, a ring fills for ~2 s, then the app opens.
+3. **Voice** — say *"voice mode"* (or dwell on the top-right *Voice mode* button), then:
 
-## If you need to retrain the base model
-```bash
-# edit DATASET_DIR at the top of dataset/prepare_dataset.py first
-python dataset/prepare_dataset.py     # builds dataset/cache/*.npy
-python dataset/train_base_model.py    # trains + saves models/base_gaze_model.pkl
-python calibrate.py                   # per-session correction on top of it
-```
-`dataset/cache/features.npy` / `targets.npy` (already built) and
-`models/base_gaze_model.pkl` / `calibration_model.pkl` (already
-trained) are included, so you don't have to redo this unless you want
-to retrain on more data.
+| Say | Action |
+|---|---|
+| `open browser` / `browser` | Opens the browser |
+| `open media` / `media` | Opens media |
+| `open files` / `files` | Opens file explorer |
+| `open notes` / `notes` | Opens notes |
+| `open camera` / `camera` | Opens camera |
+| `go back` / `gaze mode` | Returns to gaze mode |
 
-## Known gaps (be upfront with your professor)
-- Tile-region mapping in `main.py` (`BUTTONS` dict) approximates the
-  browser's tile grid by fixed fractions of the screen — not
-  pixel-calibrated to the actual rendered tile positions yet.
-- Voice pathway (`voice/`) is not implemented — teammate 4's part.
-- Gaze accuracy/response-time evaluation numbers aren't collected yet
-  (`benchmark_test.py` only covers backend action-dispatch latency).
+Stop with `Ctrl+C`, or just close the browser tab (the script exits automatically).
 
-## App states & input channels (latest)
-- **States:** `CALIBRATION_IDLE -> CALIBRATING -> ACTIVE`. Gaze selection/dwell is
-  OFF until calibration finishes; stale events are dropped via an epoch counter.
-- **Gaze pipeline:** raw -> calibration -> EMA smoothing + outlier rejection ->
-  stable target (hysteresis) -> 2 s dwell -> select. Tile hit-boxes come from the
-  real page layout (`/api/layout`).
-- **Voice mode:** one input is live at a time. The mic stays on in BOTH modes.
-  - Gaze mode: say **"voice mode"** (or "switch to voice") to switch — works even before
-    calibration. You can also dwell your gaze on the top-right **Voice mode** button (~2 s).
-  - Voice mode: say **"open camera" / "camera"**, and likewise **browser, media, files, notes**.
-    Say **"go back"** (or "gaze mode") to return to gaze mode.
-  - Calibration is gaze-only; voice switching is ignored while calibrating.
-  - Code: `voice/voice_commands.py` (persistent mic stream, listen/recognize threads, all Google
-    alternatives matched). Needs internet + microphone. Language `en-IN` by default; override with
-    env var `EVA_VOICE_LANG`. Note: in gaze mode the mic listens continuously for the wake phrase.
-- Run with `python main.py` or double-click `START_EVA.bat`.
+## Configuration
+
+| What | Where | Default |
+|---|---|---|
+| Dwell time | `main.py` → `DWELL_SECONDS` | `2.0` s |
+| Smoothing / outlier limits | `gaze/smoothing.py` → `alpha`, `max_jump`, `accept_after` | `0.30`, `0.25`, `4` |
+| Target acquire / release / cooldown | `gaze/dwell.py` | `0.25` s / `0.35` s / `1.0` s |
+| Tile hit tolerance | `frontend.html` → `HIT_PAD` | `12` px |
+| Debug log (`Raw │ Cal │ Smooth │ Target │ Dwell │ State`) | `main.py` → `DEBUG` | `True` |
+| Voice language | env var `EVA_VOICE_LANG` | `en-IN` |
+
+## Retraining the base model
+
+1. Download [MPIIGaze](https://www.mpi-inf.mpg.de/departments/computer-vision-and-machine-learning/research/gaze-based-human-computer-interaction/appearance-based-gaze-estimation-in-the-wild) and set `DATASET_DIR` in `dataset/prepare_dataset.py`.
+2. From the project root:
+   ```bash
+   python dataset/prepare_dataset.py
+   python dataset/train_base_model.py
+   ```
+3. Recalibrate in the app (the calibration is fitted on top of the base model).
+
+Training and live inference share `gaze/feature_extraction.py`, so features stay identical.
+
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| Nothing happens before calibration | Expected — gaze is disabled until calibration completes. |
+| Wrong tile selected / offset gaze | Recalibrate; keep lighting even and your face centered in the webcam. |
+| Voice status shows an error | Check the mic, `PyAudio` installation and internet connection. |
+| Commands not recognized | Speak clearly at normal volume; try `EVA_VOICE_LANG=en-US`. |
+| Page can't reach backend | Make sure `python main.py` is running on port `5000`. |
+
+## Known limitations
+
+- Webcam gaze accuracy is limited (roughly tile-sized); that's why tiles are large and dwell-based.
+- `face_width` / `face_center_y` features are in pixels, so they depend on camera resolution. Normalizing them by frame size and retraining would improve cross-camera consistency.
+- Voice requires internet, and in gaze mode the mic listens continuously for the wake phrase.
+- Head movement after calibration degrades accuracy; recalibrate if you shift position.
+
+## Tech stack
+
+Python · OpenCV · MediaPipe · scikit-learn · NumPy/SciPy · Flask · SpeechRecognition · HTML/CSS/JS
+
+## Acknowledgements
+
+- [MPIIGaze dataset](https://www.mpi-inf.mpg.de/departments/computer-vision-and-machine-learning/research/gaze-based-human-computer-interaction/appearance-based-gaze-estimation-in-the-wild) (Zhang et al.)
+- [MediaPipe](https://developers.google.com/mediapipe)
+- [SpeechRecognition](https://github.com/Uberi/speech_recognition)
+
+## License
+
+Add a license of your choice (e.g. MIT) before publishing.
